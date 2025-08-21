@@ -36,11 +36,7 @@ def extract_data_from_chunk(df_chunk):
     year_cells.sort(key=lambda x: (x['row'], x['col']))
 
     processed_years = set()
-    all_items_ordered = []
     
-    # 項目とデータを保持するDataFrameを初期化
-    df_result = pd.DataFrame()
-
     # 最初にA列の全項目を抽出し、順序を確定
     initial_items = df_chunk[0].astype(str).str.strip().dropna()
     initial_items = initial_items[initial_items != ""]
@@ -53,7 +49,7 @@ def extract_data_from_chunk(df_chunk):
     
     # 重複を削除しつつ順序を保持
     all_items_ordered = initial_items.drop_duplicates(keep='first').tolist()
-    df_result['共通項目'] = all_items_ordered
+    df_result = pd.DataFrame({'共通項目': all_items_ordered})
     
     for cell in year_cells:
         year = cell['year']
@@ -179,28 +175,10 @@ def process_files_and_tables(excel_file):
 
         # 各ファイルから抽出したDataFrameを順番にマージ
         for df_to_merge in list_of_dfs:
-            result_df = pd.merge(result_df, df_to_merge, on='共通項目', how='left')
-            # 重複した年号列を処理（先勝ち）
-            cols = result_df.columns.tolist()
-            new_cols = []
-            seen_cols = set()
-            for col in cols:
-                if col.endswith('_y'): # mergeで重複した場合_yがつく
-                    base_col = col[:-2]
-                    if base_col not in seen_cols:
-                        result_df.rename(columns={col: base_col}, inplace=True)
-                        new_cols.append(base_col)
-                        seen_cols.add(base_col)
-                elif col.endswith('_x'):
-                    base_col = col[:-2]
-                    if base_col not in seen_cols:
-                        result_df.rename(columns={col: base_col}, inplace=True)
-                        new_cols.append(base_col)
-                        seen_cols.add(base_col)
-                elif col not in seen_cols:
-                    new_cols.append(col)
-                    seen_cols.add(col)
-            result_df = result_df[new_cols]
+            # 結合前に、result_dfに既に存在する列をdf_to_mergeから削除（先勝ちルール）
+            cols_to_drop = [col for col in df_to_merge.columns if col in result_df.columns and col != '共通項目']
+            df_filtered = df_to_merge.drop(columns=cols_to_drop)
+            result_df = pd.merge(result_df, df_filtered, on='共通項目', how='left')
 
         result_df.fillna(0, inplace=True)
         
@@ -224,7 +202,7 @@ def process_files_and_tables(excel_file):
 
 
 # --- StreamlitのUI部分 ---
-st.title("📊 損益計算書 統合データ作成ツール（ファイル・ページ別）")
+st.title("� 損益計算書 統合データ作成ツール（ファイル・ページ別）")
 st.write("""
 `ファイル名:` で区切られた各データ内にある、同じ順番の表（`--- ページ`区切り）をそれぞれ集計し、統合した「まとめ表」を作成します。
 """)

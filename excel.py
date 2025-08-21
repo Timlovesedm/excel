@@ -5,77 +5,98 @@ import streamlit as st
 import pandas as pd
 import io
 import re
-from functools import reduce
 from collections import defaultdict
 
 # --- Streamlitページの初期設定 ---
 st.set_page_config(page_title="損益計算書データ整理・分析ツール", layout="wide")
 
 
-def create_df_from_sub_chunk(df_sub_chunk):
+def extract_data_from_chunk(df_chunk):
     """
-    年度データを含むブロックを受け取り、項目、年度、金額の
-    「ロングフォーマット」DataFrameを作成する。「その他」には一時的なIDを付与。
+    単一の表ブロック(DataFrame)を受け取り、3つのルールに従ってデータを抽出する。
+    1. 年号は最初に出現したものだけを採用。
+    2. 「その他」は位置を保持して複数出現を許容。
+    3. 項目は出現順を保持。
     """
-    if df_sub_chunk.empty:
-        return None
+    if df_chunk.empty:
+        return None, []
 
     year_pat = re.compile(r"^\s*20\d{2}\s*$")
     year_cells = []
-    for r in range(df_sub_chunk.shape[0]):
-        for c in range(df_sub_chunk.shape[1]):
-            cell_value = df_sub_chunk.iat[r, c]
+    for r in range(df_chunk.shape[0]):
+        for c in range(df_chunk.shape[1]):
+            cell_value = df_chunk.iat[r, c]
             if pd.notna(cell_value) and bool(year_pat.match(str(cell_value))):
                 year_cells.append({"row": r, "col": c, "year": int(str(cell_value).strip())})
 
     if not year_cells:
-        return None
+        return None, []
 
-    all_rows = []
+    # 行番号、列番号の順でソートし、処理順を確定
+    year_cells.sort(key=lambda x: (x['row'], x['col']))
+
+    processed_years = set()
+    all_items_ordered = []
+    
+    # 項目とデータを保持するDataFrameを初期化
+    df_result = pd.DataFrame()
+
+    # 最初にA列の全項目を抽出し、順序を確定
+    initial_items = df_chunk[0].astype(str).str.strip().dropna()
+    initial_items = initial_items[initial_items != ""]
+    
+    # 「その他」にユニークIDを付与
+    is_sonota = initial_items == 'その他'
+    if is_sonota.any():
+        sonota_counts = initial_items.groupby(initial_items).cumcount()
+        initial_items.loc[is_sonota] = initial_items.loc[is_sonota] + '_temp_' + sonota_counts[is_sonota].astype(str)
+    
+    # 重複を削除しつつ順序を保持
+    all_items_ordered = initial_items.drop_duplicates(keep='first').tolist()
+    df_result['共通項目'] = all_items_ordered
+    
     for cell in year_cells:
         year = cell['year']
-        val_col = cell['col']
-        start_row = cell['row'] + 1
-        
-        if 0 not in df_sub_chunk.columns or val_col not in df_sub_chunk.columns:
+        # --- ① 年号は最初に出てきたもののみ使用 ---
+        if year in processed_years:
             continue
+        processed_years.add(year)
+
+        val_col = cell['col']
         
-        sub = df_sub_chunk.iloc[start_row:, [0, val_col]].copy()
-        sub.columns = ["共通項目", "金額"]
-        sub['年度'] = year
-        all_rows.append(sub)
+        # 年号ヘッダー以降のデータを抽出
+        temp_df = df_chunk.iloc[cell['row'] + 1:, [0, val_col]].copy()
+        temp_df.columns = ["共通項目", year]
+        
+        temp_df["共通項目"] = temp_df["共通項目"].astype(str).str.strip()
+        temp_df.dropna(subset=["共通項目"], inplace=True)
+        temp_df = temp_df[temp_df["共通項目"] != ""]
 
-    if not all_rows:
-        return None
+        # --- ② "その他"の位置を保持 ---
+        is_sonota = temp_df['共通項目'] == 'その他'
+        if is_sonota.any():
+            sonota_counts = temp_df.groupby('共通項目').cumcount()
+            temp_df.loc[is_sonota, '共通項目'] = temp_df.loc[is_sonota, '共通項目'] + '_temp_' + sonota_counts[is_sonota].astype(str)
+        
+        # 金額を数値化
+        temp_df[year] = pd.to_numeric(temp_df[year].astype(str).str.replace(",", ""), errors='coerce').fillna(0)
+        
+        # 重複項目は最初に出てきたものを採用
+        temp_df = temp_df.drop_duplicates(subset=['共通項目'], keep='first')
+        
+        # 結果のDataFrameにマージ
+        df_result = pd.merge(df_result, temp_df, on='共通項目', how='left')
 
-    long_df = pd.concat(all_rows, ignore_index=True)
-
-    long_df["共通項目"] = long_df["共通項目"].astype(str).str.strip()
-    long_df.dropna(subset=["共通項目"], inplace=True)
-    long_df = long_df[long_df["共通項目"] != ""].copy()
-    
-    long_df["金額"] = long_df["金額"].replace({",": ""}, regex=True)
-    long_df["金額"] = pd.to_numeric(long_df["金額"], errors="coerce").fillna(0)
-    
-    # 「その他」に一時的なユニークIDを付与して、個別の項目として保持
-    is_sonota = long_df['共通項目'] == 'その他'
-    if is_sonota.any():
-        long_df.loc[is_sonota, '共通項目'] = (
-            long_df.loc[is_sonota, '共通項目'] + 
-            '_temp_' + 
-            long_df.groupby('共通項目').cumcount().astype(str)
-        )
-
-    # このチャンク内で項目と年度が重複するものは集計しておく
-    long_df = long_df.groupby(['共通項目', '年度']).sum().reset_index()
-
-    return long_df
+    return df_result, all_items_ordered
 
 
 def calculate_yoy(df):
     """前年比と増減額を計算する"""
-    df_for_yoy = df.groupby("共通項目").sum().reset_index()
-    df_yoy = df_for_yoy.set_index("共通項目")
+    df_yoy = df.set_index("共通項目")
+    
+    # 「その他」を集計してから計算
+    df_yoy.index = df_yoy.index.str.replace(r'_temp_\d+$', '', regex=True)
+    df_yoy = df_yoy.groupby(df_yoy.index, sort=False).sum()
     
     df_diff = df_yoy.diff(axis=1)
     df_diff.columns = [f"{col} 増減額" for col in df_diff.columns]
@@ -99,10 +120,6 @@ def calculate_yoy(df):
 
 
 def process_files_and_tables(excel_file):
-    """
-    ファイルを「ファイル名」で分割し、各ファイル内を「--- ページ」で分割。
-    同じ順番の表（1番目、2番目...）をすべて集めて統合し、最終的なまとめ表のリストを作成する。
-    """
     try:
         xls = pd.ExcelFile(excel_file)
         sheet_name_to_read = "抽出結果" if "抽出結果" in xls.sheet_names else xls.sheet_names[0]
@@ -114,7 +131,6 @@ def process_files_and_tables(excel_file):
 
     df_full[0] = df_full[0].astype(str)
     
-    # --- 1. 「ファイル名:」で全体を分割 ---
     file_indices = df_full[df_full[0].str.contains(r'ファイル名:', na=False)].index.tolist()
     file_chunks = []
     if not file_indices:
@@ -125,8 +141,8 @@ def process_files_and_tables(excel_file):
             end_idx = file_indices[i+1] if i + 1 < len(file_indices) else len(df_full)
             file_chunks.append(df_full.iloc[start_idx:end_idx].reset_index(drop=True))
 
-    # --- 2. 各ファイル内を「--- ページ」で分割し、表ごとにグループ化 ---
     grouped_tables = defaultdict(list)
+    master_item_order = defaultdict(list)
 
     for file_chunk in file_chunks:
         page_indices = file_chunk[file_chunk[0].str.contains(r'--- ページ', na=False)].index.tolist()
@@ -143,45 +159,66 @@ def process_files_and_tables(excel_file):
             table_chunks.append(final_chunk)
 
         for i, table_chunk in enumerate(table_chunks):
-            processed_df = create_df_from_sub_chunk(table_chunk.reset_index(drop=True))
+            processed_df, item_order = extract_data_from_chunk(table_chunk.reset_index(drop=True))
             if processed_df is not None and not processed_df.empty:
                 grouped_tables[i].append(processed_df)
+                # --- ③ 項目は出てきた順に上から記載 ---
+                current_order = master_item_order[i]
+                for item in item_order:
+                    if item not in current_order:
+                        current_order.append(item)
 
-    # --- 3. グループ化された表をそれぞれ統合 ---
     final_summaries = []
     for table_index in sorted(grouped_tables.keys()):
-        list_of_long_dfs = grouped_tables[table_index]
-        if not list_of_long_dfs: continue
+        list_of_dfs = grouped_tables[table_index]
+        ordered_items = master_item_order[table_index]
+        if not list_of_dfs: continue
 
-        # 3-1. 同じ順番の表（ロングフォーマット）をすべて縦に結合
-        combined_long_df = pd.concat(list_of_long_dfs, ignore_index=True)
+        # 統合先のベースとなるDataFrameを、マスターの項目順で作成
+        result_df = pd.DataFrame({'共通項目': ordered_items})
 
-        # 3-2. pivot_tableで集計し、ワイドフォーマットに変換
-        # aggfunc='sum'により、異なるファイルの同じ項目・年度の数値が合計される
-        summary_table = pd.pivot_table(
-            combined_long_df,
-            values='金額',
-            index='共通項目',
-            columns='年度',
-            aggfunc='sum',
-            fill_value=0
-        )
+        # 各ファイルから抽出したDataFrameを順番にマージ
+        for df_to_merge in list_of_dfs:
+            result_df = pd.merge(result_df, df_to_merge, on='共通項目', how='left')
+            # 重複した年号列を処理（先勝ち）
+            cols = result_df.columns.tolist()
+            new_cols = []
+            seen_cols = set()
+            for col in cols:
+                if col.endswith('_y'): # mergeで重複した場合_yがつく
+                    base_col = col[:-2]
+                    if base_col not in seen_cols:
+                        result_df.rename(columns={col: base_col}, inplace=True)
+                        new_cols.append(base_col)
+                        seen_cols.add(base_col)
+                elif col.endswith('_x'):
+                    base_col = col[:-2]
+                    if base_col not in seen_cols:
+                        result_df.rename(columns={col: base_col}, inplace=True)
+                        new_cols.append(base_col)
+                        seen_cols.add(base_col)
+                elif col not in seen_cols:
+                    new_cols.append(col)
+                    seen_cols.add(col)
+            result_df = result_df[new_cols]
 
-        # 3-3. 最終的な整形
-        summary_table.reset_index(inplace=True)
+        result_df.fillna(0, inplace=True)
         
-        # 「その他」の一時的なIDを削除
-        summary_table['共通項目'] = summary_table['共通項目'].str.replace(r'_temp_\d+$', '', regex=True)
+        # 項目列以外の列名（年度）を取得
+        year_cols = [col for col in result_df.columns if col != '共通項目']
+        # 年度列を数値に変換してソート
+        sorted_year_cols = sorted([col for col in year_cols if isinstance(col, (int, float)) or str(col).isdigit()], key=int)
         
-        # 年度列を昇順にソート
-        year_cols = sorted([col for col in summary_table.columns if isinstance(col, (int, float))])
-        final_cols = ['共通項目'] + year_cols
-        summary_table = summary_table[final_cols]
+        final_cols = ['共通項目'] + sorted_year_cols
+        result_df = result_df[final_cols]
 
-        for col in year_cols:
-            summary_table[col] = summary_table[col].astype(int)
+        for col in sorted_year_cols:
+            result_df[col] = result_df[col].astype(int)
         
-        final_summaries.append(summary_table)
+        # 「その他」のユニークIDを削除
+        result_df['共通項目'] = result_df['共通項目'].str.replace(r'_temp_\d+$', '', regex=True)
+
+        final_summaries.append(result_df)
             
     return final_summaries
 
@@ -226,21 +263,23 @@ if uploaded_file:
                     
                     with tab2:
                         st.subheader("主要項目の年度推移グラフ")
-                        items = summary_df["共通項目"].unique()
+                        # グラフ用に「その他」を一旦集計
+                        df_for_chart = summary_df.copy()
+                        df_for_chart['共通項目'] = df_for_chart['共通項目'].str.replace(r'_temp_\d+$', '', regex=True)
+                        df_for_chart = df_for_chart.groupby('共通項目', sort=False).sum()
+                        
+                        items = df_for_chart.index.tolist()
                         default_items = [item for item in ["売上高", "営業利益", "経常利益", "当期純利益"] if item in items]
                         selected_items = st.multiselect(
                             "グラフに表示する項目を選択", options=items, default=default_items, key=f"chart_{i}"
                         )
                         if selected_items:
-                            df_chart = summary_df[summary_df["共通項目"].isin(selected_items)].groupby("共通項目").sum().T
-                            df_chart.index.name = "年度"
-                            st.line_chart(df_chart)
+                            st.line_chart(df_for_chart.loc[selected_items].T)
                     
                     with tab3:
                         st.subheader("前年比・増減額")
                         df_yoy_result = calculate_yoy(summary_df)
                         st.dataframe(df_yoy_result.style.format(precision=2, na_rep='-'))
-
         else:
             st.error("有効なデータを抽出できませんでした。ファイルの形式をご確認ください。")
 else:

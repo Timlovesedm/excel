@@ -158,11 +158,22 @@ def process_files_and_tables(excel_file):
             processed_df, item_order = extract_data_from_chunk(table_chunk.reset_index(drop=True))
             if processed_df is not None and not processed_df.empty:
                 grouped_tables[i].append(processed_df)
-                # --- ③ 項目は出てきた順に上から記載 ---
-                current_order = master_item_order[i]
-                for item in item_order:
-                    if item not in current_order:
-                        current_order.append(item)
+                
+                # --- ③ 新しい項目順の決定ロジック ---
+                current_master_order = master_item_order[i]
+                if not current_master_order:
+                    # マスターリストが空なら、最初のリストをそのまま採用
+                    master_item_order[i].extend(item_order)
+                else:
+                    # 2番目以降のリストは、位置を保ちながらマージする
+                    last_known_index = -1
+                    for item in item_order:
+                        if item in current_master_order:
+                            last_known_index = current_master_order.index(item)
+                        else:
+                            # 新しい項目は、直前に通過した既知の項目の後ろに挿入
+                            current_master_order.insert(last_known_index + 1, item)
+                            last_known_index += 1
 
     final_summaries = []
     for table_index in sorted(grouped_tables.keys()):
@@ -202,7 +213,7 @@ def process_files_and_tables(excel_file):
 
 
 # --- StreamlitのUI部分 ---
-st.title("� 損益計算書 統合データ作成ツール（ファイル・ページ別）")
+st.title("📊 損益計算書 統合データ作成ツール（ファイル・ページ別）")
 st.write("""
 `ファイル名:` で区切られた各データ内にある、同じ順番の表（`--- ページ`区切り）をそれぞれ集計し、統合した「まとめ表」を作成します。
 """)

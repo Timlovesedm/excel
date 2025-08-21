@@ -120,7 +120,6 @@ def process_files_and_tables(excel_file):
         xls = pd.ExcelFile(excel_file)
         sheet_name_to_read = "抽出結果" if "抽出結果" in xls.sheet_names else xls.sheet_names[0]
         df_full = pd.read_excel(xls, sheet_name=sheet_name_to_read, header=None)
-        st.info(f"シート「{sheet_name_to_read}」を処理しています...")
     except Exception as e:
         st.error(f"Excelファイルの読み込みに失敗しました: {e}")
         return None
@@ -213,63 +212,62 @@ def process_files_and_tables(excel_file):
 
 
 # --- StreamlitのUI部分 ---
-st.title("📊 損益計算書 統合データ作成ツール（ファイル・ページ別）")
+st.title("📊 損益計算書 統合データ作成ツール")
 st.write("""
 `ファイル名:` で区切られた各データ内にある、同じ順番の表（`--- ページ`区切り）をそれぞれ集計し、統合した「まとめ表」を作成します。
 """)
 
-uploaded_file = st.file_uploader("処理したいExcelファイル（.xlsx）をアップロードしてください", type=["xlsx"])
+uploaded_file = st.file_uploader("処理したいExcelファイル（.xlsx）をアップロードしてください", type=["xlsx"], label_visibility="collapsed")
 
-if uploaded_file:
-    st.info(f"ファイル名: `{uploaded_file.name}`")
+if st.button("統合まとめ表を作成 ▶️", type="primary", disabled=(uploaded_file is None)):
+    
+    with st.spinner("データを整理・分析中..."):
+        all_summaries = process_files_and_tables(uploaded_file)
 
-    if st.button("統合まとめ表を作成 ▶️", type="primary"):
-        with st.spinner("データを整理・分析中..."):
-            all_summaries = process_files_and_tables(uploaded_file)
+    if all_summaries:
+        st.success(f"✅ {len(all_summaries)}個の統合まとめ表が作成されました！")
 
-        if all_summaries:
-            st.success(f"✅ {len(all_summaries)}個の統合まとめ表が作成されました！")
-
-            output_excel = io.BytesIO()
-            with pd.ExcelWriter(output_excel, engine="xlsxwriter") as writer:
-                for i, summary_df in enumerate(all_summaries):
-                    summary_df.to_excel(writer, sheet_name=f"統合まとめ表_{i+1}", index=False)
-            
-            st.download_button(
-                label="📥 全ての統合まとめ表をExcelで一括ダウンロード",
-                data=output_excel.getvalue(),
-                file_name=f"統合まとめ表_{uploaded_file.name}",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-            st.divider()
-
+        output_excel = io.BytesIO()
+        with pd.ExcelWriter(output_excel, engine="xlsxwriter") as writer:
             for i, summary_df in enumerate(all_summaries):
-                with st.expander(f"▼ **統合まとめ表 {i+1}** の分析結果を見る"):
-                    tab1, tab2, tab3 = st.tabs(["整理後データ", "📈 推移グラフ", "🆚 前年比・増減"])
+                summary_df.to_excel(writer, sheet_name=f"統合まとめ表_{i+1}", index=False)
+        
+        st.download_button(
+            label="📥 全ての統合まとめ表をExcelで一括ダウンロード",
+            data=output_excel.getvalue(),
+            file_name=f"統合まとめ表_{uploaded_file.name}",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.divider()
+
+        for i, summary_df in enumerate(all_summaries):
+            with st.expander(f"▼ **統合まとめ表 {i+1}** の分析結果を見る"):
+                tab1, tab2, tab3 = st.tabs(["整理後データ", "📈 推移グラフ", "🆚 前年比・増減"])
+                
+                with tab1:
+                    st.dataframe(summary_df)
+                
+                with tab2:
+                    st.subheader("主要項目の年度推移グラフ")
+                    # グラフ用に「その他」を一旦集計
+                    df_for_chart = summary_df.copy()
+                    df_for_chart['共通項目'] = df_for_chart['共通項目'].str.replace(r'_temp_\d+$', '', regex=True)
+                    df_for_chart = df_for_chart.groupby('共通項目', sort=False).sum()
                     
-                    with tab1:
-                        st.dataframe(summary_df)
-                    
-                    with tab2:
-                        st.subheader("主要項目の年度推移グラフ")
-                        # グラフ用に「その他」を一旦集計
-                        df_for_chart = summary_df.copy()
-                        df_for_chart['共通項目'] = df_for_chart['共通項目'].str.replace(r'_temp_\d+$', '', regex=True)
-                        df_for_chart = df_for_chart.groupby('共通項目', sort=False).sum()
-                        
-                        items = df_for_chart.index.tolist()
-                        default_items = [item for item in ["売上高", "営業利益", "経常利益", "当期純利益"] if item in items]
-                        selected_items = st.multiselect(
-                            "グラフに表示する項目を選択", options=items, default=default_items, key=f"chart_{i}"
-                        )
-                        if selected_items:
-                            st.line_chart(df_for_chart.loc[selected_items].T)
-                    
-                    with tab3:
-                        st.subheader("前年比・増減額")
-                        df_yoy_result = calculate_yoy(summary_df)
-                        st.dataframe(df_yoy_result.style.format(precision=2, na_rep='-'))
-        else:
-            st.error("有効なデータを抽出できませんでした。ファイルの形式をご確認ください。")
-else:
-    st.warning("☝️ 上のボタンからExcelファイルをアップロードしてください。")
+                    items = df_for_chart.index.tolist()
+                    default_items = [item for item in ["売上高", "営業利益", "経常利益", "当期純利益"] if item in items]
+                    selected_items = st.multiselect(
+                        "グラフに表示する項目を選択", options=items, default=default_items, key=f"chart_{i}"
+                    )
+                    if selected_items:
+                        st.line_chart(df_for_chart.loc[selected_items].T)
+                
+                with tab3:
+                    st.subheader("前年比・増減額")
+                    df_yoy_result = calculate_yoy(summary_df)
+                    st.dataframe(df_yoy_result.style.format(precision=2, na_rep='-'))
+    elif uploaded_file: # ボタンが押されなかったがファイルはある場合
+        st.info(f"ファイル「{uploaded_file.name}」が選択されています。ボタンを押して処理を開始してください。")
+    else: # ボタンが押されたがファイルがない場合（disabledなので通常はここに来ないが念のため）
+        st.error("ファイルが選択されていません。ファイルをアップロードしてください。")
+

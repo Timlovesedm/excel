@@ -6,94 +6,70 @@ import pandas as pd
 import io
 import re
 from functools import reduce
+from collections import defaultdict
 
 # --- Streamlitページの初期設定 ---
 st.set_page_config(page_title="損益計算書データ整理・分析ツール", layout="wide")
 
 
-def create_summary_from_chunk(df_chunk):
+def create_df_from_sub_chunk(df_sub_chunk):
     """
-    単一のデータブロック（DataFrame）を受け取り、内部の全年度データを統合したまとめ表を作成する。
+    年度データを含むブロックを受け取り、項目、年度、金額の
+    「ロングフォーマット」DataFrameを作成する。「その他」には一時的なIDを付与。
     """
-    if df_chunk.empty:
+    if df_sub_chunk.empty:
         return None
 
-    # --- 1. ブロック内の年度ヘッダーをすべて検索 ---
     year_pat = re.compile(r"^\s*20\d{2}\s*$")
     year_cells = []
-    for r in range(df_chunk.shape[0]):
-        for c in range(df_chunk.shape[1]):
-            cell_value = df_chunk.iat[r, c]
+    for r in range(df_sub_chunk.shape[0]):
+        for c in range(df_sub_chunk.shape[1]):
+            cell_value = df_sub_chunk.iat[r, c]
             if pd.notna(cell_value) and bool(year_pat.match(str(cell_value))):
                 year_cells.append({"row": r, "col": c, "year": int(str(cell_value).strip())})
 
     if not year_cells:
         return None
 
-    year_cells.sort(key=lambda x: x['row'])
-    
-    unique_year_cells = []
-    processed_years = set()
+    all_rows = []
     for cell in year_cells:
-        if cell['year'] not in processed_years:
-            unique_year_cells.append(cell)
-            processed_years.add(cell['year'])
-
-    block_definitions = []
-    for i, cell in enumerate(unique_year_cells):
-        start_data_row = cell['row'] + 1
-        # 終了行は、次の年度セルの直前か、ブロックの最後まで
-        end_data_row = unique_year_cells[i+1]['row'] if i + 1 < len(unique_year_cells) else len(df_chunk)
-        block_definitions.append({
-            "year": cell['year'], "col": cell['col'],
-            "start": start_data_row, "end": end_data_row
-        })
-
-    # --- 2. 年度ごとのデータを抽出し、DataFrameのリストを作成 ---
-    dfs = []
-    for block in block_definitions:
-        year = block['year']
-        val_col = block['col']
+        year = cell['year']
+        val_col = cell['col']
+        start_row = cell['row'] + 1
         
-        if 0 not in df_chunk.columns or val_col not in df_chunk.columns:
+        if 0 not in df_sub_chunk.columns or val_col not in df_sub_chunk.columns:
             continue
         
-        sub = df_chunk.iloc[block['start']:block['end'], [0, val_col]].copy()
-        sub.columns = ["共通項目", year]
+        sub = df_sub_chunk.iloc[start_row:, [0, val_col]].copy()
+        sub.columns = ["共通項目", "金額"]
+        sub['年度'] = year
+        all_rows.append(sub)
 
-        sub["共通項目"] = sub["共通項目"].astype(str).str.strip()
-        sub.dropna(subset=["共通項目"], inplace=True)
-        sub = sub[sub["共通項目"] != ""]
-        if sub.empty: continue
-
-        # 「その他」は重複を許容し、他は削除
-        sonota_df = sub[sub["共通項目"] == "その他"].copy()
-        other_items_df = sub[sub["共通項目"] != "その他"].copy()
-        other_items_df.drop_duplicates(subset=["共通項目"], keep="first", inplace=True)
-        sub = pd.concat([sonota_df, other_items_df]).sort_index()
-
-        sub[year] = sub[year].replace({",": ""}, regex=True)
-        sub[year] = pd.to_numeric(sub[year], errors="coerce").fillna(0)
-        
-        sub.set_index("共通項目", inplace=True)
-        dfs.append(sub)
-
-    if not dfs:
+    if not all_rows:
         return None
 
-    # --- 3. 全年度データを結合して整形 ---
-    consolidated = pd.concat(dfs, axis=1, join="outer").fillna(0)
+    long_df = pd.concat(all_rows, ignore_index=True)
+
+    long_df["共通項目"] = long_df["共通項目"].astype(str).str.strip()
+    long_df.dropna(subset=["共通項目"], inplace=True)
+    long_df = long_df[long_df["共通項目"] != ""].copy()
     
-    # 年度列を昇順にソート
-    year_cols = sorted([col for col in consolidated.columns if isinstance(col, (int, float))])
-    consolidated = consolidated[year_cols]
+    long_df["金額"] = long_df["金額"].replace({",": ""}, regex=True)
+    long_df["金額"] = pd.to_numeric(long_df["金額"], errors="coerce").fillna(0)
+    
+    # 「その他」に一時的なユニークIDを付与して、個別の項目として保持
+    is_sonota = long_df['共通項目'] == 'その他'
+    if is_sonota.any():
+        long_df.loc[is_sonota, '共通項目'] = (
+            long_df.loc[is_sonota, '共通項目'] + 
+            '_temp_' + 
+            long_df.groupby('共通項目').cumcount().astype(str)
+        )
 
-    # 金額を整数に変換
-    for col in year_cols:
-        consolidated[col] = consolidated[col].astype(int)
+    # このチャンク内で項目と年度が重複するものは集計しておく
+    long_df = long_df.groupby(['共通項目', '年度']).sum().reset_index()
 
-    consolidated.reset_index(inplace=True)
-    return consolidated
+    return long_df
 
 
 def calculate_yoy(df):
@@ -122,9 +98,10 @@ def calculate_yoy(df):
     return df_merged
 
 
-def process_file_by_page_delimiter(excel_file):
+def process_files_and_tables(excel_file):
     """
-    アップロードされたExcelファイルを「--- ページ」で分割し、ブロックごとにまとめ表を作成する。
+    ファイルを「ファイル名」で分割し、各ファイル内を「--- ページ」で分割。
+    同じ順番の表（1番目、2番目...）をすべて集めて統合し、最終的なまとめ表のリストを作成する。
     """
     try:
         xls = pd.ExcelFile(excel_file)
@@ -135,41 +112,84 @@ def process_file_by_page_delimiter(excel_file):
         st.error(f"Excelファイルの読み込みに失敗しました: {e}")
         return None
 
-    # --- 1. 「--- ページ」を基準にファイルをブロックに分割 ---
     df_full[0] = df_full[0].astype(str)
-    # 区切り文字を含む行のインデックスを取得
-    split_indices = df_full[df_full[0].str.contains(r'--- ページ', na=False)].index.tolist()
+    
+    # --- 1. 「ファイル名:」で全体を分割 ---
+    file_indices = df_full[df_full[0].str.contains(r'ファイル名:', na=False)].index.tolist()
+    file_chunks = []
+    if not file_indices:
+        file_chunks.append(df_full)
+    else:
+        for i in range(len(file_indices)):
+            start_idx = file_indices[i]
+            end_idx = file_indices[i+1] if i + 1 < len(file_indices) else len(df_full)
+            file_chunks.append(df_full.iloc[start_idx:end_idx].reset_index(drop=True))
 
-    data_chunks = []
-    last_idx = 0
-    for idx in split_indices:
-        chunk = df_full.iloc[last_idx:idx]
-        if not chunk.empty:
-            data_chunks.append(chunk.reset_index(drop=True))
-        last_idx = idx
-    # 最後の区切り文字以降のデータを追加
-    final_chunk = df_full.iloc[last_idx:]
-    if not final_chunk.empty:
-        data_chunks.append(final_chunk.reset_index(drop=True))
+    # --- 2. 各ファイル内を「--- ページ」で分割し、表ごとにグループ化 ---
+    grouped_tables = defaultdict(list)
 
-    if not data_chunks:
-        # 区切りが見つからない場合は全体を1ブロックとして扱う
-        data_chunks.append(df_full)
+    for file_chunk in file_chunks:
+        page_indices = file_chunk[file_chunk[0].str.contains(r'--- ページ', na=False)].index.tolist()
+        
+        table_chunks = []
+        last_idx = 0
+        for idx in page_indices:
+            chunk = file_chunk.iloc[last_idx:idx]
+            if not chunk.empty:
+                table_chunks.append(chunk)
+            last_idx = idx
+        final_chunk = file_chunk.iloc[last_idx:]
+        if not final_chunk.empty:
+            table_chunks.append(final_chunk)
 
-    # --- 2. 各ブロックを処理して、まとめ表のリストを作成 ---
-    summary_tables = []
-    for chunk in data_chunks:
-        summary_table = create_summary_from_chunk(chunk)
-        if summary_table is not None and not summary_table.empty:
-            summary_tables.append(summary_table)
+        for i, table_chunk in enumerate(table_chunks):
+            processed_df = create_df_from_sub_chunk(table_chunk.reset_index(drop=True))
+            if processed_df is not None and not processed_df.empty:
+                grouped_tables[i].append(processed_df)
+
+    # --- 3. グループ化された表をそれぞれ統合 ---
+    final_summaries = []
+    for table_index in sorted(grouped_tables.keys()):
+        list_of_long_dfs = grouped_tables[table_index]
+        if not list_of_long_dfs: continue
+
+        # 3-1. 同じ順番の表（ロングフォーマット）をすべて縦に結合
+        combined_long_df = pd.concat(list_of_long_dfs, ignore_index=True)
+
+        # 3-2. pivot_tableで集計し、ワイドフォーマットに変換
+        # aggfunc='sum'により、異なるファイルの同じ項目・年度の数値が合計される
+        summary_table = pd.pivot_table(
+            combined_long_df,
+            values='金額',
+            index='共通項目',
+            columns='年度',
+            aggfunc='sum',
+            fill_value=0
+        )
+
+        # 3-3. 最終的な整形
+        summary_table.reset_index(inplace=True)
+        
+        # 「その他」の一時的なIDを削除
+        summary_table['共通項目'] = summary_table['共通項目'].str.replace(r'_temp_\d+$', '', regex=True)
+        
+        # 年度列を昇順にソート
+        year_cols = sorted([col for col in summary_table.columns if isinstance(col, (int, float))])
+        final_cols = ['共通項目'] + year_cols
+        summary_table = summary_table[final_cols]
+
+        for col in year_cols:
+            summary_table[col] = summary_table[col].astype(int)
+        
+        final_summaries.append(summary_table)
             
-    return summary_tables
+    return final_summaries
 
 
 # --- StreamlitのUI部分 ---
-st.title("📊 損益計算書 データ整理ツール（ページ区切り対応）")
+st.title("📊 損益計算書 統合データ作成ツール（ファイル・ページ別）")
 st.write("""
-`--- ページ` という記載を区切りとして、各ブロックのデータを統合した「まとめ表」をそれぞれ作成します。
+`ファイル名:` で区切られた各データ内にある、同じ順番の表（`--- ページ`区切り）をそれぞれ集計し、統合した「まとめ表」を作成します。
 """)
 
 uploaded_file = st.file_uploader("処理したいExcelファイル（.xlsx）をアップロードしてください", type=["xlsx"])
@@ -177,30 +197,28 @@ uploaded_file = st.file_uploader("処理したいExcelファイル（.xlsx）を
 if uploaded_file:
     st.info(f"ファイル名: `{uploaded_file.name}`")
 
-    if st.button("まとめ表を作成 ▶️", type="primary"):
+    if st.button("統合まとめ表を作成 ▶️", type="primary"):
         with st.spinner("データを整理・分析中..."):
-            all_summaries = process_file_by_page_delimiter(uploaded_file)
+            all_summaries = process_files_and_tables(uploaded_file)
 
         if all_summaries:
-            st.success(f"✅ {len(all_summaries)}個のまとめ表が作成されました！")
+            st.success(f"✅ {len(all_summaries)}個の統合まとめ表が作成されました！")
 
-            # --- 一括ダウンロードボタン ---
             output_excel = io.BytesIO()
             with pd.ExcelWriter(output_excel, engine="xlsxwriter") as writer:
                 for i, summary_df in enumerate(all_summaries):
-                    summary_df.to_excel(writer, sheet_name=f"まとめ表_{i+1}", index=False)
+                    summary_df.to_excel(writer, sheet_name=f"統合まとめ表_{i+1}", index=False)
             
             st.download_button(
-                label="📥 全てのまとめ表をExcelで一括ダウンロード",
+                label="📥 全ての統合まとめ表をExcelで一括ダウンロード",
                 data=output_excel.getvalue(),
-                file_name=f"まとめ表_{uploaded_file.name}",
+                file_name=f"統合まとめ表_{uploaded_file.name}",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
             st.divider()
 
-            # --- 各まとめ表をExpanderで表示 ---
             for i, summary_df in enumerate(all_summaries):
-                with st.expander(f"▼ **まとめ表 {i+1}** の分析結果を見る"):
+                with st.expander(f"▼ **統合まとめ表 {i+1}** の分析結果を見る"):
                     tab1, tab2, tab3 = st.tabs(["整理後データ", "📈 推移グラフ", "🆚 前年比・増減"])
                     
                     with tab1:

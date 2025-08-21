@@ -212,9 +212,9 @@ def process_files_and_tables(excel_file):
 
 
 # --- StreamlitのUI部分 ---
-st.title("📊 損益計算書 統合データ作成ツール")
+st.title("📊 統合データ作成ツール")
 st.write("""
-`ファイル名:` で区切られた各データ内にある、同じ順番の表（`--- ページ`区切り）をそれぞれ集計し、統合した「まとめ表」を作成します。
+`ファイル名:` で区切られた各データ内にある、同じ順番の表（`--- ページ`区切り）をそれぞれ集計し、統合した「まとめ表」を作成します。年号（2020）記載必要
 """)
 
 uploaded_file = st.file_uploader("処理したいExcelファイル（.xlsx）をアップロードしてください", type=["xlsx"], label_visibility="collapsed")
@@ -270,5 +270,6 @@ if st.button("統合まとめ表を作成 ▶️", type="primary", disabled=(upl
         st.info(f"ファイル「{uploaded_file.name}」が選択されています。ボタンを押して処理を開始してください。")
     else: # ボタンが押されたがファイルがない場合（disabledなので通常はここに来ないが念のため）
         st.error("ファイルが選択されていません。ファイルをアップロードしてください。")
+
 
 

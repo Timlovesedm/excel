@@ -8,7 +8,7 @@ import re
 from collections import defaultdict
 
 # --- Streamlitページの初期設定 ---
-st.set_page_config(page_title="損益計算書データ整理・分析ツール", layout="wide")
+st.set_page_config(page_title="データ整理・分析ツール", layout="wide")
 
 
 def extract_data_from_chunk(df_chunk):
@@ -270,4 +270,5 @@ if st.button("統合まとめ表を作成 ▶️", type="primary", disabled=(upl
         st.info(f"ファイル「{uploaded_file.name}」が選択されています。ボタンを押して処理を開始してください。")
     else: # ボタンが押されたがファイルがない場合（disabledなので通常はここに来ないが念のため）
         st.error("ファイルが選択されていません。ファイルをアップロードしてください。")
+
 
